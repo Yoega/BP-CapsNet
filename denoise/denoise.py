@@ -8,38 +8,38 @@ from torch import nn
 import torch
 import torch.nn as nn
 channel_n = 3
-# 定义均值滤波层
+# define mean filter layer
 class MeanFilter(nn.Module):
     def __init__(self, kernel_size):
         super(MeanFilter, self).__init__()
         self.kernel_size = kernel_size
-        # 初始化一个卷积层
+        # initialize a convolutional layer
         self.conv = nn.Conv2d(in_channels=channel_n, out_channels=channel_n, kernel_size=kernel_size,
                               stride=1, padding=kernel_size // 2, bias=False, groups=channel_n)
 
-        # 初始化滤波器权重
+        # initialize filter weights
         self.initialize_weights()
 
     def forward(self, x):
         return self.conv(x)
 
     def initialize_weights(self):
-        # 计算均值滤波核
+        # calculate mean filter kernel
         kernel = torch.ones(1, 1, self.kernel_size, self.kernel_size) / (self.kernel_size * self.kernel_size)
-        kernel = kernel.repeat(channel_n, 1, 1, 1)  # 对每个通道重复核
+        kernel = kernel.repeat(channel_n, 1, 1, 1)  # repeat the kernel for each channel
 
-        # 设置卷积层权重
+        # set convolutional layer weights
         self.conv.weight.data = kernel
-        self.conv.weight.requires_grad = False  # 固定权重，不需要梯度
+        self.conv.weight.requires_grad = False  # fixed weights, no gradient required
 
 
 def GaussianBlur(batch_img, ksize, sigma=0):
-    kernel = getGaussianKernel(ksize, sigma) # 生成权重
-    B, C, H, W = batch_img.shape # C：图像通道数，group convolution 要用到
-    # 生成 group convolution 的卷积核
+    kernel = getGaussianKernel(ksize, sigma) 
+    B, C, H, W = batch_img.shape # C：number of image channels, to be used by group convolution
+    # generate the convolution kernel of group convolution
     kernel = kernel.view(1, 1, ksize, ksize).repeat(C, 1, 1, 1)
-    pad = (ksize - 1) // 2 # 保持卷积前后图像尺寸不变
-    # mode=relfect 更适合计算边缘像素的权重
+    pad = (ksize - 1) // 2 
+    # mode=relfect--->more suitable for calculating the weight of edge pixels
     batch_img_pad = F.pad(batch_img, pad=[pad, pad, pad, pad], mode='reflect')
     weighted_pix = F.conv2d(batch_img_pad, weight=kernel, bias=None,
                            stride=1, padding=0, groups=C)
@@ -48,12 +48,11 @@ def GaussianBlur(batch_img, ksize, sigma=0):
 @torch.no_grad()
 def getGaussianKernel(ksize, sigma=0):
     if sigma <= 0:
-        # 根据 kernelsize 计算默认的 sigma，和 opencv 保持一致
+     
         sigma = 0.3 * ((ksize - 1) * 0.5 - 1) + 0.8
     center = ksize // 2
-    xs = (np.arange(ksize, dtype=np.float32) - center) # 元素与矩阵中心的横向距离
-    kernel1d = np.exp(-(xs ** 2) / (2 * sigma ** 2)) # 计算一维卷积核
-    # 根据指数函数性质，利用矩阵乘法快速计算二维卷积核
+    xs = (np.arange(ksize, dtype=np.float32) - center) # the lateral distance of the element from the center of the matrix
+    kernel1d = np.exp(-(xs ** 2) / (2 * sigma ** 2)) 
     kernel = kernel1d[..., None] @ kernel1d[None, ...]
     kernel = torch.from_numpy(kernel)
     kernel = kernel / kernel.sum() # 归一化
