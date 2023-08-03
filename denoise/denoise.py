@@ -55,6 +55,6 @@ def getGaussianKernel(ksize, sigma=0):
     kernel1d = np.exp(-(xs ** 2) / (2 * sigma ** 2)) 
     kernel = kernel1d[..., None] @ kernel1d[None, ...]
     kernel = torch.from_numpy(kernel)
-    kernel = kernel / kernel.sum() # 归一化
+    kernel = kernel / kernel.sum() 
     return kernel
 
