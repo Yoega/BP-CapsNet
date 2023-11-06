@@ -32,9 +32,9 @@ from tensorboardX import SummaryWriter
 from collections import OrderedDict
 
 sys.path.append('/swin/WingaLey/Inner_product/base/RAW')
-from base import capsnet as caps
-from base import bpcapsnet as bpcaps
-from resnets import ResNet18, ResNet50
+from models import capsnet as caps
+from models import bpcapsnet as bpcaps
+from models.resnets import ResNet18, ResNet50
 import medmnist
 from medmnist import INFO
 from denoise import *
