@@ -1,16 +1,21 @@
-
+"""
+    Adapted from https://github.com/MedMNIST/experiments/blob/main/MedMNIST2D/train_and_eval_pytorch.py
+"""
 import os
 import argparse
 import sys
 import time
 import random
-import numpy as np
 from tqdm import trange
 import PIL
-import torch
-import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
+from loss import Criterion
+import torch
+import numpy as np
+from copy import deepcopy
+
+
 def setup_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -20,36 +25,34 @@ def setup_seed(seed):
 
 
 # set random seed
-setup_seed(3407)
+setup_seed(665)
 import torchvision.transforms as transforms
 from torchvision.models import resnet18, resnet50
 from tensorboardX import SummaryWriter
 from collections import OrderedDict
-# sys.path.append('/swin/WingaLey/Inner_product/base/RAW')
-sys.path.append('/home/zyli/exper/CapsNet/capsnet/Inner_product/base/RAW')
-from RAW import capsnet as caps
-from models import ResNet18, ResNet50
 
+sys.path.append('/swin/WingaLey/Inner_product/base/RAW')
+from base import capsnet as caps
+from base import bpcapsnet as bpcaps
+from resnets import ResNet18, ResNet50
 import medmnist
 from medmnist import INFO
-from denoise import GaussianBlur, MeanFilter
-class_n = 9
-channel_n = 3
-# root = '/home/swin/WingaLey/Inner_product/data'
-root = '/home/zyli/exper/CapsNet/capsnet/Inner_product/data'
+from denoise import *
 
+root = 'your data path'  # your data root
 
 
 def main(data_flag, output_root, num_epochs, gpu_ids, batch_size,
-         download, model_flag, resize, as_rgb, model_path, run):
+         download, model_flag, resize, as_rgb, model_path, run, denoise):
     lr = 1e-4
     gamma = 0.96
 
     info = INFO[data_flag]
     task = info['task']
+    global n_channels
     n_channels = 3 if as_rgb else info['n_channels']
+    global n_classes
     n_classes = len(info['label'])
-
     DataClass = getattr(medmnist, info['python_class'])
 
     str_ids = gpu_ids.split(',')
@@ -59,10 +62,9 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size,
         if id >= 0:
             gpu_ids.append(id)
     if len(gpu_ids) > 0:
-        os.environ["CUDA_VISIBLE_DEVICES"]=str(gpu_ids[0])
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_ids[0])
 
     device = torch.device('cuda:{}'.format(gpu_ids[0])) if gpu_ids else torch.device('cpu')
-
 
     output_root = os.path.join(output_root, data_flag, time.strftime("%y%m%d_%H%M%S"))
     print(output_root)
@@ -79,37 +81,37 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size,
     else:
         data_transform = transforms.Compose(
             [transforms.ToTensor(),
-             transforms.RandomCrop(28, padding=2),
              transforms.Normalize(mean=[.5], std=[.5])])
 
     train_dataset = DataClass(split='train', transform=data_transform, download=download, as_rgb=as_rgb, root=root)
     val_dataset = DataClass(split='val', transform=data_transform, download=download, as_rgb=as_rgb, root=root)
     test_dataset = DataClass(split='test', transform=data_transform, download=download, as_rgb=as_rgb, root=root)
 
-
     train_loader = data.DataLoader(dataset=train_dataset,
-                                batch_size=batch_size,
-                                shuffle=True)
+                                   batch_size=batch_size,
+                                   shuffle=True)
     train_loader_at_eval = data.DataLoader(dataset=train_dataset,
-                                batch_size=batch_size,
-                                shuffle=False)
+                                           batch_size=batch_size,
+                                           shuffle=False)
     val_loader = data.DataLoader(dataset=val_dataset,
-                                batch_size=batch_size,
-                                shuffle=False)
+                                 batch_size=batch_size,
+                                 shuffle=False)
     test_loader = data.DataLoader(dataset=test_dataset,
-                                batch_size=batch_size,
-                                shuffle=False)
+                                  batch_size=batch_size,
+                                  shuffle=False)
 
     print('==> Building and training model...')
 
-
     if model_flag == 'resnet18':
-        model =  resnet18(pretrained=False, num_classes=n_classes) if resize else ResNet18(in_channels=n_channels, num_classes=n_classes)
+        model = resnet18(pretrained=False, num_classes=n_classes) if resize else ResNet18(in_channels=n_channels,
+                                                                                          num_classes=n_classes)
     elif model_flag == 'resnet50':
-        model =  resnet50(pretrained=False, num_classes=n_classes) if resize else ResNet50(in_channels=n_channels, num_classes=n_classes)
-    # add capsule network
-    elif model_flag == 'capsnet':
-        model = caps.CapsNet()
+        model = resnet50(pretrained=False, num_classes=n_classes) if resize else ResNet50(in_channels=n_channels,
+                                                                                          num_classes=n_classes)
+    elif model_flag == 'caps':
+        model = caps.CapsNet(n_channels, n_classes)
+    elif model_flag == 'bpcaps':
+        model = bpcaps.BPCapsNet(n_channels, n_classes)
     else:
         raise NotImplementedError
 
@@ -119,12 +121,7 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size,
     val_evaluator = medmnist.Evaluator(data_flag, 'val', root=root)
     test_evaluator = medmnist.Evaluator(data_flag, 'test', root=root)
 
-    # if task == "multi-label, binary-class":
-    #     criterion = nn.BCEWithLogitsLoss()
-    # else:
-    #     criterion = nn.CrossEntropyLoss()
-    criterion = caps.CapsuleLoss().to(device)
-
+    criterion = Criterion(model_flag)
 
     if model_path is not None:
         model.load_state_dict(torch.load(model_path, map_location=device)['net'], strict=True)
@@ -143,28 +140,34 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size,
     scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
 
     logs = ['loss', 'auc', 'acc']
-    train_logs = ['train_'+log for log in logs]
-    val_logs = ['val_'+log for log in logs]
-    test_logs = ['test_'+log for log in logs]
-    log_dict = OrderedDict.fromkeys(train_logs+val_logs+test_logs, 0)
+    train_logs = ['train_' + log for log in logs]
+    val_logs = ['val_' + log for log in logs]
+    test_logs = ['test_' + log for log in logs]
+    log_dict = OrderedDict.fromkeys(train_logs + val_logs + test_logs, 0)
 
     writer = SummaryWriter(log_dir=os.path.join(output_root, 'Tensorboard_Results'))
 
     best_auc = 0
     best_epoch = 0
-    best_model = model
+    best_model = deepcopy(model)
 
     global iteration
     iteration = 0
 
+    # determine whether to do noise reduction
+    deno_method = None
+    if denoise is None:
+        print("No denoising operation!")
+    else:
+        deno_method = denoise_selector(denoise, n_channels)
+
     for epoch in trange(num_epochs):
-        train_loss = train(model, train_loader, task, criterion, optimizer, device, writer)
+        train_loss = train(model, train_loader, model_flag, criterion, optimizer, device, writer, deno_method)
 
+        train_metrics = test(model, train_evaluator, train_loader_at_eval, model_flag, criterion, device, run)
+        val_metrics = test(model, val_evaluator, val_loader, model_flag, criterion, device, run)
+        test_metrics = test(model, test_evaluator, test_loader, model_flag, criterion, device, run)
 
-
-        train_metrics = test(model, train_evaluator, train_loader_at_eval, task, criterion, device, run)
-        val_metrics = test(model, val_evaluator, val_loader, task, criterion, device, run)
-        test_metrics = test(model, test_evaluator, test_loader, task, criterion, device, run)
 
         scheduler.step()
 
@@ -182,20 +185,23 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size,
         if cur_auc > best_auc:
             best_epoch = epoch
             best_auc = cur_auc
-            best_model = model
+            best_model = deepcopy(model)
+            print("Val improved!")
             print('cur_best_auc:', best_auc)
             print('cur_best_epoch', best_epoch)
 
     state = {
         'net': best_model.state_dict(),
+        'best_epoch': best_epoch,
     }
 
     path = os.path.join(output_root, 'best_model.pth')
     torch.save(state, path)
 
-    train_metrics = test(best_model, train_evaluator, train_loader_at_eval, task, criterion, device, run, output_root)
-    val_metrics = test(best_model, val_evaluator, val_loader, task, criterion, device, run, output_root)
-    test_metrics = test(best_model, test_evaluator, test_loader, task, criterion, device, run, output_root)
+    train_metrics = test(best_model, train_evaluator, train_loader_at_eval, model_flag, criterion, device, run, output_root)
+    val_metrics = test(best_model, val_evaluator, val_loader, model_flag, criterion, device, run, output_root)
+    test_metrics = test(best_model, test_evaluator, test_loader, model_flag, criterion, device, run, output_root)
+
 
     train_log = 'train  auc: %.5f  acc: %.5f\n' % (train_metrics[1], train_metrics[2])
     val_log = 'val  auc: %.5f  acc: %.5f\n' % (val_metrics[1], val_metrics[2])
@@ -210,45 +216,26 @@ def main(data_flag, output_root, num_epochs, gpu_ids, batch_size,
     writer.close()
 
 
-def train(model, train_loader, task, criterion, optimizer, device, writer):
+def train(model, train_loader, model_flag, criterion, optimizer, device, writer, deno_method):
     total_loss = []
     global iteration
 
     model.train()
     for batch_idx, (inputs, targets) in enumerate(train_loader):
         optimizer.zero_grad()
-        """
-        outputs = model(inputs.to(device))
-        """
+        if deno_method is not None:
+            inputs = deno_method(inputs)
 
-        # # capsule network model
-        # # # SVD module
-        # num = 12
-        # inputs = torch.reshape(inputs, [-1, 28*channel_n, 28])
-        # U, sigma, VT = torch.linalg.svd(inputs)
-        # inputs = torch.matmul((torch.matmul(U[:, :, 0:num], torch.diag_embed(sigma)[:, 0:num, 0:num])), VT[:, 0:num, :])
-        # inputs = torch.reshape(inputs, [-1, channel_n, 28, 28]).to(device)
-
-        # mean value filter
-        mean_filter = MeanFilter(3)
-        inputs = mean_filter(inputs).to(device)
-
-        # # # Guassian Blur
-        # inputs = GaussianBlur(inputs, 3).to(device)
-
-        # inputs = inputs.to(device)
+        inputs = inputs.to(device)
         targets = torch.squeeze(targets, dim=1)
-        targets = torch.eye(class_n).index_select(dim=0, index=targets).to(device)
-        outputs, reconstruction = model(inputs)
+        targets = torch.eye(n_classes).index_select(dim=0, index=targets).to(device)
 
-        """
-        if task == 'multi-label, binary-class':
-            targets = targets.to(torch.float32).to(device)
-            loss = criterion(outputs, targets)
+        reconstruction = None
+        if model_flag[:3] == "res":
+            outputs = model(inputs)
         else:
-            targets = torch.squeeze(targets, 1).long().to(device)
-            loss = criterion(outputs, targets)
-        """
+            outputs, reconstruction = model(inputs)
+
         # Compute loss & accuracy
         # --> traverse to tensor
         loss = criterion(inputs, targets, outputs, reconstruction)
@@ -259,12 +246,11 @@ def train(model, train_loader, task, criterion, optimizer, device, writer):
         loss.backward()
         optimizer.step()
 
-    epoch_loss = sum(total_loss)/len(total_loss)
+    epoch_loss = sum(total_loss) / len(total_loss)
     return epoch_loss
 
 
-def test(model, evaluator, data_loader, task, criterion, device, run, save_folder=None):
-
+def test(model, evaluator, data_loader, model_flag, criterion, device, run, save_folder=None):
     model.eval()
 
     total_loss = []
@@ -272,33 +258,19 @@ def test(model, evaluator, data_loader, task, criterion, device, run, save_folde
 
     with torch.no_grad():
         for batch_idx, (inputs, targets) in enumerate(data_loader):
-            """
-            outputs = model(inputs.to(device))
-            """
-            # outputs and reconstruction of testinputs.to(device)
+            # outputs and reconstruction of test inputs.to(device)
             inputs = inputs.to(device)
-            outputs, reconstruction = model(inputs)
-
-            if task == 'multi-label, binary-class':
-                targets = targets.to(torch.float32).to(device)
-                loss = criterion(outputs, targets)
-                m = nn.Sigmoid()
-                outputs = m(outputs).to(device)
+            reconstruction = None
+            if model_flag[:3] == "res":
+                outputs = model(inputs)
             else:
-                """
-                targets = torch.squeeze(targets, 1).long().to(device)
-                loss = criterion(outputs, targets)
-                m = nn.Softmax(dim=1)
-                outputs = m(outputs).to(device)
-                """
-                targets = torch.squeeze(targets, dim=1)
-                targets = torch.eye(class_n).index_select(dim=0, index=targets).to(device)
-                loss = criterion(inputs, targets, outputs, reconstruction)
-                targets = targets.float().resize_(len(targets), 1)
+                outputs, reconstruction = model(inputs)
 
+            targets = torch.squeeze(targets, dim=1)
+            targets = torch.eye(n_classes).index_select(dim=0, index=targets).to(device)
+            loss = criterion(inputs, targets, outputs, reconstruction)
             total_loss.append(loss.item())
             y_score = torch.cat((y_score, outputs), 0)
-
 
         y_score = y_score.detach().cpu().numpy()
         auc, acc = evaluator.evaluate(y_score, save_folder, run)
@@ -310,10 +282,10 @@ def test(model, evaluator, data_loader, task, criterion, device, run, save_folde
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
-        description='RUN Baseline model of MedMNIST2D')
+        description='RUN Baseline models and CapsNets of MedMNIST2D')
 
     parser.add_argument('--data_flag',
-                        default='pathmnist',
+                        default='breastmnist',
                         type=str)
     parser.add_argument('--output_root',
                         default='./results',
@@ -324,30 +296,34 @@ if __name__ == '__main__':
                         help='num of epochs of training, the script would only test model if set num_epochs to 0',
                         type=int)
     parser.add_argument('--gpu_ids',
-                        default='2',
+                        default='0',
                         type=str)
     parser.add_argument('--batch_size',
-                        default=32,
+                        default=16,
                         type=int)
-    # parser.add_argument('--download',
-    #                     action="store_true")
-    # parser.add_argument('--resize',
-    #                     help='resize images of size 28x28 to 224x224',
-    #                     action="store_false")
-    # parser.add_argument('--as_rgb',
-    #                     help='convert the grayscale image to RGB',
-    #                     action='store_true')
+    parser.add_argument('--download',
+                        action="store_true")
+    parser.add_argument('--resize',
+                        help='resize images of size 28x28 to 224x224',
+                        action="store_true")
+    parser.add_argument('--as_rgb',
+                        help='convert the grayscale image to RGB',
+                        action="store_true")
     parser.add_argument('--model_path',
                         default=None,
                         help='root of the pretrained model to test',
                         type=str)
     parser.add_argument('--model_flag',
-                        default='capsnet',
-                        help='choose backbone from resnet18, resnet50, capsnet',
+                        default='bpcaps',
+                        help='choose backbone from resnet18, resnet50, capsnet, and bp-capsnet',
                         type=str)
     parser.add_argument('--run',
                         default='model1',
                         help='to name a standard evaluation csv file, named as {flag}_{split}_[AUC]{auc:.3f}_[ACC]{acc:.3f}@{run}.csv',
+                        type=str)
+    parser.add_argument('--denoise',
+                        default=None,
+                        help='to preprocess the original images, SVD, Gaussian filter, Mean filter for denoising',
                         type=str)
 
     args = parser.parse_args()
@@ -356,11 +332,13 @@ if __name__ == '__main__':
     num_epochs = args.num_epochs
     gpu_ids = args.gpu_ids
     batch_size = args.batch_size
-    download = True
+    download = args.download
     model_flag = args.model_flag
-    resize = False
-    as_rgb = True
+    resize = args.resize
+    as_rgb = args.as_rgb
     model_path = args.model_path
     run = args.run
+    denoise = args.denoise
 
-    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, model_flag, resize, as_rgb, model_path, run)
+    main(data_flag, output_root, num_epochs, gpu_ids, batch_size, download, model_flag, resize, as_rgb, model_path, run,
+         denoise)
